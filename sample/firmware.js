@@ -16,9 +16,9 @@ var SDKClient = require('iotconnect-sdk-tpm');
 - disconnectDuration:: Device connection close after defined time in seconds to call dispose() method
 - sdkOptions        :: It helps to define the path of self signed and CA signed certificate as well as define the offlinne storagr params
 */
-var cpId = "";
-var uniqueId = "";
-var scopeId = "";
+var cpId = "<<Your CPID>>";
+var uniqueId = "<<Your UniqueID>>";
+var scopeId = "<Your ScopeID>>";
 var env = "";  
 var dataSendInterval = 10; // send data frequency in seconds
 var disconnectDuration = 0; //Seconds If set 0 then it never disconnect
