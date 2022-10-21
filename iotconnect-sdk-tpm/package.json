@@ -1,0 +1,30 @@
+{
+  "name": "iotconnect-sdk-tpm",
+  "version": "3.1.0",
+  "main": "app.js",
+  "scripts": {
+    "test": "node app.js"
+  },
+  "keywords": [
+    "IoT connect SDK for D2C and C2D communication"
+  ],
+  "author": "SOFTWEB SOLUTIONS<admin@softwebsolutions.com> (https://www.softwebsolutions.com)",
+  "license": "MIT",
+  "description": "SDK for D2C and C2D communication",
+  "private": true,
+  "dependencies": {
+    "async": "^2.0.0",
+    "bluebird": "^3.7.1",
+    "fs-extra": "^7.0.1",
+    "fs-extra-promise": "^1.0.1",
+    "json-query": "^2.2.2",
+    "memory-cache": "^0.2.0",
+    "mqtt": "^1.12.0",
+    "request": "^2.85.0",
+    "azure-iot-device": "^1.17.3",
+    "azure-iot-device-mqtt": "^1.15.3",
+    "azure-iot-provisioning-device": "^1.8.7",
+    "azure-iot-provisioning-device-http": "^1.8.7",
+    "azure-iot-security-tpm": "^1.8.7"
+  }
+}
