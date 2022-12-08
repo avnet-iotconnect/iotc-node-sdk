@@ -1651,7 +1651,7 @@ class CommonFunctions {
                             thirdLevelObj[attlocalName] = attrValue;
                             attributeObj['cv'] = thirdLevelObj;
                             attributeObj.d.push(validateAttributes)
-                            newObj.d.push(attributeObj);
+                            newObj.d.push({...attributeObj});
 
                             var cmdObj = {
                                 cpid: deviceData.cpId,
@@ -1670,8 +1670,14 @@ class CommonFunctions {
                         cb_rl();
                     }, function () {
                         if (ruleFlag == 1) {
-                            self.sendDataOnAzureMQTT(newObj, uniqueId, brokerClient, offlineConfig, isDebug);
-                        }
+                            if(newObj && newObj.d){
+                                newObj.d.forEach(r=>{
+                                    let dataToSend = {...newObj}
+                                    dataToSend.d = [r]
+                                    self.sendDataOnAzureMQTT(dataToSend, uniqueId, brokerClient, offlineConfig, isDebug);
+                                })
+                                }
+                            }    
                     });
                 }
             }
