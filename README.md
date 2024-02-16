@@ -1,5 +1,5 @@
 ﻿﻿# Softweb Solutions Inc
-## IOT Connect SDK : Software Development Kit 1.0 Mesage type 2.1
+## IOT Connect SDK : Software Development Kit 2.3.0
 
 **Prerequisite tools:**
 
@@ -8,11 +8,11 @@
 
 **Installation :** 
 
-1. Extract the "iotconnect-sdk-node-v1.0.zip"
+1. Extract the "iotconnect-sdk-node-v2.3.0.zip"
 
 2. To install the required libraries use the below command:
 	- Goto SDK directory path using terminal/Command prompt
-	- cd iotconnect-sdk-node-v1.0
+	- cd iotconnect-sdk-node-v2.3.0
 	- npm install (Install prerequisite nodejs library)
 	- npm install iotconnect-sdk (Install the 'iotconnect-sdk' package in nodejs library)
 
@@ -31,15 +31,19 @@
 **Usage :**
 
 - To initialize the SDK object need to import below sdk package
+```node
 var SDKClient = require('iotconnect-sdk');
+```
 
 - Prerequisite standard input data 
-- Prerequisite standard configuration data 
+```node
+//"Get your ENV and CPID from the portal key vaults module or visit https://help.iotconnect.io SDK section."
+var uniqueId = <<uniqueId>>;
+var cpId = <<CPID>>; 
+var env = <<env>>;
 ```
-UniqueId = "<<Device UniqueID>>"
-SId = "<<Your SID>>"
-
 - SdkOptions is for the SDK configuration and need to parse in SDK object initialize call. You need to manage the below onfiguration as per your device authentications.
+```json
 var sdkOptions = {
     "certificate" : { //For SSL CA signed and SelfSigned authorized device only
         "SSLKeyPath"	: "<< SystemPath >>/device.key",
@@ -62,33 +66,44 @@ Note: sdkOptions is a mandatory parameter for sdk object initialize call.
 		- disabled : false = offline data storing, true = not storing offline data 
 		- availSpaceInMb : Define the file size of offline data which should be in (MB)
 		- fileCount : Number of files need to create for offline data
-    "discoveryUrl" : (*) Discovery URL is mandatory parameter to get device details
+```
 
 - To Initialize the SDK object and connect to the cloud
+```node
 var iotConnectSDK = new SDKClient(cpid, uniqueId, deviceCallback, twinUpdateCallback, sdkOptions, env);
 
 - Note : sdkOptions is an optional parameter
+```
 
 - To receive the command from Cloud to Device(C2D)	
+```node
 var deviceCallback = function deviceCallback(data){
 	console.log(data);
 	if(data.cmdType == "0x01")
 		// Device Command
 	if(data.cmdType == "0x02")
 		// Firmware Command
+	if(data.cmdType == "0x16")
+		// Device connection status
 }
+```
 
 - To receive the twin from Cloud to Device(C2D)
+```node
 var twinUpdateCallback = function twinUpdateCallback(data){
     console.log(data);
 }
+```
 
 - To get the list of attributes
+```node
 iotConnectSDK.getAttributes(function(response){
 	console.log("Attributed :: "+ response);
 });
+```
 
 - This is the standard data input format for Gateway and non Gateway device.
+```json
 1. For Non Gateway Device 
 var data = [{
     "uniqueId": "<< Device UniqueId >>",
@@ -107,11 +122,15 @@ var data = [{
 	"time": "<< date >>", // "2019-12-24T10:06:17.857Z" Date format should be as defined
 	"data": {} // example : {"temperature": 15.55, "gyroscope" : { 'x' : -1.2 }}
 }]
+```
 
 - To send the data from Device To Cloud(D2C)
+```node
 iotConnectSDK.sendData(data);
+```
 
 - To send the command acknowledgment
+```node
 var obj = {
 	"ackId": data.ackId,
 	"st": Acknowledgment status sent to cloud
@@ -133,20 +152,27 @@ var msgType = 5; // for "0x01" device command
 var msgType = 11; // for "0x02" Firmware OTA command 
 
 iotConnectSDK.sendAck(obj, msgType)
+```
 
 - To update the Twin Property
+```node
 var key = "<< Desired property key >>"; // Desired proeprty key received from Twin callback message
 var value = "<< Desired Property value >>"; // Value of respective desired property
 Example : 
 var key = "firmware_version";
 var value = "4.0";
 iotConnectSDK.updateTwin(key,value)
+```
 
 - To disconnect the device from the cloud
+```node
 iotConnectSDK.dispose()
+```
 
 - To get the all twin property Desired and Reported
+```node
 iotConnectSDK.getAllTwins();
+```
 
 ## Release Note :
 
@@ -166,4 +192,20 @@ iotConnectSDK.getAllTwins();
 ** Improvements **
 1. We have updated below methods name:
    To Initialize the SDK object:
-	- new SDKClient(uniqueId, sId, sdkOptions, function(response)
+	- Old : new sdk(cpid, uniqueId, callbackMessage, twinCallbackMessage, env, sdkOptions);
+	- New : new SDKClient(cpid, uniqueId, deviceCallback, twinUpdateCallback, sdkOptions, env);
+   To send the data :
+    - Old : SendData(data)
+    - New : sendData(data)
+   To update the Twin Reported Property :
+    - Old : UpdateTwin(key, value)
+    - New : updateTwin(key, value)
+   To receive Device command callback :
+    - Old : callbackMessage(data);
+	- New : deviceCallback(data);
+   To receive OTA command callback :
+    - Old : twinCallbackMessage(data);
+	- New : twinUpdateCallback(data);
+2. Remove properties.json file and use the sdkOptions for the certificate and offline data storage  configuration. 
+3. Discovery URL moves from hard code setting to the sdkOptions to enhance the global experience.
+4. Update the OTA command recceiveer payload for multiple OTA files
