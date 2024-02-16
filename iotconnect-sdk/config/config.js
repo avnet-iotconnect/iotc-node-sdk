@@ -3,8 +3,9 @@
 // const discoveryUrl = "/api/sdk/sid/<<SID>>/uid/<<UID>>";
 const msgFormatVersion = "2.1";
 const discoveryUrl = "/api/v"+msgFormatVersion+"/dsdk/sid/<<SID>>";
-const discoveryUrlHost = "https://discovery.iotconnect.io/";
-//const discoveryUrlHost = "http://52.204.155.38:219/"; //"http://10.81.234.124:7404";
+const discoveryUrlwithCpid = `/api/v${msgFormatVersion}/dsdk/cpid/<<CPID>>/env/<<ENV>>?pf=<<PF>>`
+// const discoveryUrlHost = "https://discovery.iotconnect.io/";
+const discoveryUrlHost = "http://52.204.155.38:219/"; //"http://10.81.234.124:7404";
 const sasTokenExpiryTime = 365 * 24 * 60; // (expiresInMins) Expiry time 365 days
 const dpsHostUrl = "global.azure-devices-provisioning.net";
 const resyncFrequency = 10; // Recheck after 10 seconds 
@@ -18,6 +19,7 @@ const deviceParams = 204;
 const otaParams = 205;
 const protocolParams = 201;
 const allParams = 210;
+const edgeFaultDataFrequency = 60000; // In 60 sec For Edge device only
 
 const hbStatusFlag = 0;
 const messageType = {
@@ -206,7 +208,8 @@ const authType = {
 	"CA_SIGNED" : 2,
 	"CA_SELF_SIGNED" : 3,
 	"TPM": 4,
-	"SYMMETRIC_KEY" : 5
+	"SYMMETRIC_KEY" : 5,
+	"CA_INDIVIDUAL" : 7
 }
 
 const msgType = {
@@ -427,10 +430,18 @@ module.exports = {
 	sdkVersion: "2.1",
 	msgFormatVersion: msgFormatVersion,
 	sdkLanguage: "M_Node",
-	twinPropertyPubTopic: "$iothub/twin/PATCH/properties/reported/?$rid=1",
-	twinPropertySubTopic: "$iothub/twin/PATCH/properties/desired/#",
-	twinResponsePubTopic: "$iothub/twin/GET/?$rid=0",
-	twinResponseSubTopic: "$iothub/twin/res/#",
+	az : {
+		twinPropertyPubTopic: "$iothub/twin/PATCH/properties/reported/?$rid=1",
+		twinPropertySubTopic: "$iothub/twin/PATCH/properties/desired/#",
+		twinResponsePubTopic: "$iothub/twin/GET/?$rid=0",
+		twinResponseSubTopic: "$iothub/twin/res/#",	
+	},
+	aws: {
+		twinPropertyPubTopic: "$aws/things/{Cpid_DeviceID}/shadow/name/{Cpid_DeviceID}_twin_shadow/report",
+		twinPropertySubTopic: "$aws/things/{Cpid_DeviceID}/shadow/name/{Cpid_DeviceID}_twin_shadow/property-shadow",
+		twinResponseSubTopic: "$aws/things/{Cpid_DeviceID}/shadow/name/{Cpid_DeviceID}_twin_shadow/get/all",
+		twinResponsePubTopic: "$aws/things/{Cpid_DeviceID}/shadow/name/{Cpid_DeviceID}_twin_shadow/get",
+	},
 	directMethodForSelectedMethodSubTopic_SW: "$iothub/methods/POST/{method_name}/?$rid={request_id}",
 	directMethodForAllSubTopic_SW: "$iothub/methods/POST/#",
 	errorLog: errorLog,
@@ -446,5 +457,7 @@ module.exports = {
 	createChildDeviceErrorCode: createChildDeviceErrorCode,
 	deleteChildDeviceErrorCode: deleteChildDeviceErrorCode,
 	commandTypeFlag: commandTypeFlag,
-	resyncFrequency: resyncFrequency
+	resyncFrequency: resyncFrequency,
+	discoveryUrlwithCpid,
+	edgeFaultDataFrequency
 }

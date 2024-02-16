@@ -30,13 +30,6 @@ class Mqtt {
         this.initCallback = callback;
         sdkOpt['SDK_TYPE'] = "MQTT";
 
-        // For SYmmetric Key Auth type support
-        if(sdkOptions && 'devicePK' in sdkOptions) {
-            this.DEVICE_PRIMARY_KEY = sdkOptions.devicePK;
-        } else {
-            this.DEVICE_PRIMARY_KEY = ""; 
-        }
-
         if(sdkOptions && 'skipValidation' in sdkOptions) {
             this.SKIP_VALIDATION = sdkOptions.skipValidation;
         } else {
@@ -95,8 +88,19 @@ class Mqtt {
         sdkOpt['offlineStorage'] = this.offlineFileConfig;
         sdkOpt['isGatewayDevice'] = false;
         sdkOpt['isEdgeDevice'] = false;
-        this.LOG_PATH = "./logs/offline/" + sId + "_" + uniqueId + "/";
+        this.LOG_PATH = "./logs/offline/" + (sId ||  sdkOptions.cpId) + "_" + uniqueId + "/";
         sdkOpt['logPath'] = this.LOG_PATH;
+        sdkOpt['cpId'] = sdkOptions.cpId;
+        sdkOpt['env'] = sdkOptions.env;
+        sdkOpt['pf'] = sdkOptions.pf;
+
+        this.commonLib = new CommonFunctions(sId, uniqueId, sdkOpt);
+        if (!sId) {
+            this.commonLib.manageDebugLog("ERR_IN04", this.UNIQUE_ID, this.SID, "", 0, this.IS_DEBUG);
+        }
+        if (!uniqueId) {
+            this.commonLib.manageDebugLog("ERR_IN05", this.UNIQUE_ID, this.SID, "", 0, this.IS_DEBUG);
+        }
 
         if (sdkOptions && 'discoveryURL' in sdkOptions && this.commonLib) {
             if (sdkOptions.discoveryURL != "" && sdkOptions.discoveryURL != undefined && sdkOptions.discoveryURL != null) {
@@ -115,15 +119,7 @@ class Mqtt {
         }
         this.SDK_OPTIONS = sdkOpt;
 
-        this.commonLib = new CommonFunctions(sId, uniqueId, sdkOpt);
-        if (!sId) {
-            this.commonLib.manageDebugLog("ERR_IN04", this.UNIQUE_ID, this.SID, "", 0, this.IS_DEBUG);
-        }
-        if (!uniqueId) {
-            this.commonLib.manageDebugLog("ERR_IN05", this.UNIQUE_ID, this.SID, "", 0, this.IS_DEBUG);
-        }
-
-        if (sId && uniqueId && !sdkOpt.offlineStorage.offlineProcessDisabled) {
+        if ((sId || sdkOpt.cpId) && uniqueId && !sdkOpt.offlineStorage.offlineProcessDisabled) {
             var self = this;
             this.createPredefinedLogDirectories();
             this.init(function (response) {
@@ -165,7 +161,7 @@ class Mqtt {
      */
     async init(callback) {
         var self = this;
-        var sId = self.SID;
+        var sId = self.SID || self.SDK_OPTIONS.cpId;
         var uniqueId = self.UNIQUE_ID;
         if (sId && uniqueId) {
             var sId = sId;
@@ -175,7 +171,7 @@ class Mqtt {
                 var syncData = "";
                 self.commonLib.manageDebugLog("INFO_IN04", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
                 self.syncDevice(function (response) {
-                    console.log("==== 200 command ======", JSON.stringify(response,null,2));
+                    // console.log("==== 200 command ======", JSON.stringify(response,null,2));
                     syncData = response;
                     if (response) {
 
@@ -203,20 +199,9 @@ class Mqtt {
 
                             self.commonLib.manageDebugLog("INFO_CM11", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
                             //console.log("Mqtt -> init -> response.data.meta.at", response.data.meta.at)
-                            if ((response.data.meta.at == config.authType.CA_SIGNED || response.data.meta.at == config.authType.CA_SELF_SIGNED) && self.CERT_PATH_FLAG == false) {
-                                // console.log("1232132 innn")
+                            if ((response.data.meta.at == config.authType.CA_SIGNED || response.data.meta.at == config.authType.CA_SELF_SIGNED || response.data.meta.at == config.authType.CA_INDIVIDUAL) && self.CERT_PATH_FLAG == false) {
                                 self.commonLib.manageDebugLog("ERR_IN06", self.UNIQUE_ID, self.SID, "", 0, self.IS_DEBUG)
                                 //process.exit();
-                            } else {
-                                console.log("1232132 config.authType.SYMMETRIC_KEY ==> ", config.authType.SYMMETRIC_KEY)
-                                if (response.data.meta.at == config.authType.SYMMETRIC_KEY) {
-                                    var deviceSyncRes = cache.get(self.SID + "_" + self.UNIQUE_ID);
-                                    var brokerConfiguration = deviceSyncRes.p;
-                                    generateSasToken(brokerConfiguration.h, self.DEVICE_PRIMARY_KEY, null, config.sasTokenExpiryTime, function (sasToken) {
-                                        deviceSyncRes.p.pwd = sasToken;
-                                        cache.put(self.SID + "_" + self.UNIQUE_ID, deviceSyncRes);
-                                    });
-                                }
                             }
                             self.DEVICE_CONNECTED = false;
                             async.series([
@@ -517,7 +502,7 @@ class Mqtt {
         try {
             self.clientConnection(function (clientResponse) {
                 // console.log("Mqtt -> deviceConnectionProcess -> clientResponse 11111 ==> ", clientResponse)
-                if (clientResponse.status) {
+                if (clientResponse?.status) {
                     self.DEVICE_CONNECTED = true;
                     self.STOP_SDK_CONNECTION = true;
                     self.startCommandSubscriber(function (response) {
@@ -574,9 +559,9 @@ class Mqtt {
         try {
             self.commonLib.clientConnection(function (response) {
                 callback({
-                    status: response.status,
+                    status: response?.status,
                     data: response,
-                    message: response.message
+                    message: response?.message
                 })
             })
         } catch (error) {
@@ -663,6 +648,13 @@ class Mqtt {
         }
     }
 
+    dispose () {
+        var self = this;
+        self.commonLib.onHardStopCommand();
+        console.log("DeviceId ::: [" + self.UNIQUE_ID + "] :: SDK Disconnected :: ", new Date());            
+        process.exit();
+    }
+
     /* 
     Object : Device 
     Author : Mayank [SOFTWEB]
@@ -674,10 +666,12 @@ class Mqtt {
         var self = this;
         var cmdType = response.data.ct;
         var commandData = response.data;
+        var commandDataJson = commandData ? JSON.stringify(commandData) : ""
 
         switch (response.data.ct) {
             case config.commandType.CORE_COMMAND: //0 - Ok device
                 self.commonLib.manageDebugLog("INFO_CM01", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM01", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = undefined;
                 if (self.DEVICE_CMD_CALLBACK)
                     self.DEVICE_CMD_CALLBACK(commandData);
@@ -685,13 +679,17 @@ class Mqtt {
 
             case config.commandType.FIRMWARE_UPDATE: //1 - OTA Firmware update
                 self.commonLib.manageDebugLog("INFO_CM02", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM02", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = undefined;
                 if (self.OTA_CMD_RECEIVED_CALLBACK)
-                    self.OTA_CMD_RECEIVED_CALLBACK(commandData);
+                    setTimeout(()=>{
+                        self.OTA_CMD_RECEIVED_CALLBACK(commandData);
+                    }, 10000)
                 break;
 
             case config.commandType.MODULE_COMMAND: //2 - Module command 
                 self.commonLib.manageDebugLog("INFO_CM05", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM05", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = undefined;
                 if (self.MODULE_RECEIVED_CALLBACK)
                     self.MODULE_RECEIVED_CALLBACK(commandData);
@@ -705,27 +703,32 @@ class Mqtt {
                 }
                 var requestedParams = undefined;
                 self.commonLib.manageDebugLog("INFO_CM09", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM09", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 if (self.CONNECTION_STATUS_CALLBACK)
                     self.CONNECTION_STATUS_CALLBACK(commandData);
                 break;
 
             case config.commandType.REFRESH_ATTRIBUTE: //101 - Attribute Changed
                 self.commonLib.manageDebugLog("INFO_CM03", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM03", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = config.attributeParams;
                 break;
 
             case config.commandType.REFRESH_SETTING_TWIN: //102 - Setting Changed
                 self.commonLib.manageDebugLog("INFO_CM04", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM04", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = config.settingsParams;
                 break;
 
             case config.commandType.REFRESH_EDGE_RULE: //103 - Rule Changed
                 self.commonLib.manageDebugLog("INFO_CM07", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM07", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = config.ruleParams;
                 break;
 
             case config.commandType.REFRESH_CHILD_DEVICE: //104 - Device Changed
                 self.commonLib.manageDebugLog("INFO_CM06", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM06", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 if(self.SDK_OPTIONS.isGatewayDevice) {
                     var requestedParams = config.deviceParams;
                 } else {
@@ -735,6 +738,7 @@ class Mqtt {
 
             case config.commandType.DATA_FREQUENCY_CHANGE: //105 - Data Frequency Updated
                 self.commonLib.manageDebugLog("INFO_CM18", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM18", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var deviceSyncResDf = cache.get(self.SID + "_" + self.UNIQUE_ID);
                 deviceSyncResDf.meta.df = commandData.df;
                 cache.put(self.SID + "_" + self.UNIQUE_ID, deviceSyncResDf);
@@ -746,6 +750,7 @@ class Mqtt {
                 self.STOP_SDK_CONNECTION = false;
                 var requestedParams = undefined;
                 self.commonLib.manageDebugLog("INFO_CM21", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM21", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 break;
 
             case config.commandType.DEVICE_DISABLED: //107 - Device Disabled
@@ -753,17 +758,20 @@ class Mqtt {
                 self.STOP_SDK_CONNECTION = false;
                 var requestedParams = config.deviceParams;
                 self.commonLib.manageDebugLog("INFO_CM22", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM22", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 break;
 
             case config.commandType.DEVICE_RELEASED: //108 - Device Released
                 self.commonLib.onHardStopCommand();
                 self.STOP_SDK_CONNECTION = false;    
                 self.commonLib.manageDebugLog("INFO_CM23", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM23", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = undefined;
                 break;
 
             case config.commandType.STOP_OPERATION: //109 - STOP SDK CONNECTION
                 self.commonLib.manageDebugLog("INFO_CM08", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM08", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 // self.disconnect(config.commandType.STOP_OPERATION);
                 self.commonLib.onHardStopCommand();
                 self.STOP_SDK_CONNECTION = false;
@@ -772,6 +780,7 @@ class Mqtt {
 
             case config.commandType.START_HEARTBEAT_DEVICE: //110 - Heartbeat Start
                 self.commonLib.manageDebugLog("INFO_CM24", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM24", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var requestedParams = undefined;
                 var deviceSyncResDf = cache.get(self.SID + "_" + self.UNIQUE_ID);
                 deviceSyncResDf.meta["hbf"] = commandData.f;
@@ -781,6 +790,7 @@ class Mqtt {
 
             case config.commandType.STOP_HEARTBEAT_DEVICE: //111 - Heartbeat Stop
                 self.commonLib.manageDebugLog("INFO_CM25", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM25", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 var deviceSyncResDf = cache.get(self.SID + "_" + self.UNIQUE_ID);
                 deviceSyncResDf.meta["hbf"] = null;
                 self.commonLib.onHeartbeatCommand(false, 0);
@@ -790,6 +800,7 @@ class Mqtt {
 
             case config.commandType.SDK_LOG_FLAG: //112 - SDK LOG ENABLED/DISABLED - Update flag SDK log display in cmd prompt
                 self.commonLib.manageDebugLog("INFO_CM26", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM26", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 self.SDK_OPTIONS.isDebug = commandData.debugFlag;
                 self.IS_DEBUG = commandData.debugFlag;
                 self.commonLib.onLogCommand(commandData);
@@ -798,6 +809,7 @@ class Mqtt {
                 
             case config.commandType.SKIP_ATTRIBUTE_VALIDATION: //113 - SKIP ATTRIBUTE VALIDATION - Skip Attribute validation during data send 
                 self.commonLib.manageDebugLog("INFO_CM27", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM27", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 self.SDK_OPTIONS.skipValidation = commandData.skipValidation;
                 self.commonLib.onValidationSkipCommand(commandData);
                 var requestedParams = undefined;
@@ -805,12 +817,14 @@ class Mqtt {
 
             case config.commandType.SEND_SDK_LOG_FILE: //114 - SEND SDK LOG FILE - Request command for SDK Log file upload
                 self.commonLib.manageDebugLog("INFO_CM28", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM28", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 console.log(" Remain to be develope send SDK log file feature");
                 var requestedParams = undefined;
                 break;
 
             case config.commandType.DEVICE_DELETE_REQUEST: //115 - DELETE DEVICE - Delete device request command
                 self.commonLib.manageDebugLog("INFO_CM29", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
+                self.commonLib.manageDebugLog("INFO_CM29", self.UNIQUE_ID, self.SID, commandDataJson, 1, self.IS_DEBUG);
                 console.log(" Remain to be develope delete device feature");
                 var requestedParams = undefined;
                 break;
@@ -954,7 +968,7 @@ class Mqtt {
                     var deviceData = cache.get(cacheId);
                     deviceData["att"] = response.d['att'];
                     cache.put(cacheId, deviceData);
-                    console.log("Attribute Received ===>>>", JSON.stringify(deviceData.att, null, 2))
+                    console.log("Attribute Received ===>>>", JSON.stringify(response, null, 2))
                     self.commonLib.manageDebugLog("INFO_CM12", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
                     if (self.SDK_OPTIONS.isEdgeDevice)
                         self.checkForEdgeDeviceConfigurationProcess("attr");
@@ -967,7 +981,7 @@ class Mqtt {
                     var deviceData = cache.get(cacheId);
                     deviceData["set"] = response.d['set'];
                     cache.put(cacheId, deviceData);
-                    console.log("Device setting >>>>>",JSON.stringify(deviceData.set, null, 2));
+                    console.log("Device setting >>>>>",JSON.stringify(response, null, 2));
                     self.commonLib.manageDebugLog("INFO_CM13", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
                 }
                 break;
@@ -996,11 +1010,12 @@ class Mqtt {
                         }];
                         var result = _.unionWith(gatewayDevice, devices, _.isEqual);
                         deviceData["d"] = result;
+                        deviceData["has"]["d"] = result.length - 1;
                         if(self.DEVICE_CHANGED_CALLBACK)
                             self.DEVICE_CHANGED_CALLBACK(deviceData["d"]);
                         if (self.SDK_OPTIONS.isEdgeDevice)
-                            self.checkForEdgeDeviceConfigurationProcess("d");
-                        self.attributeChangedCallbackProcess("d");
+                            self.checkForEdgeDeviceConfigurationProcess("d", true);
+                        self.attributeChangedCallbackProcess("d", true);
                     } else {
                         deviceData["d"] = response.d['d'];
                     }
@@ -1222,6 +1237,7 @@ class Mqtt {
                 var obj = {};
                 obj[key] = value;
                 // obj['sid'] = self.SID;
+                console.log("Shadow update received :::::",JSON.stringify(obj));
                 self.commonLib.UpdateTwin(obj, function (response) {
                     if (response.status) {
                         self.commonLib.manageDebugLog("INFO_TP01", self.UNIQUE_ID, self.SID, "", 1, self.IS_DEBUG);
@@ -1601,7 +1617,7 @@ class Mqtt {
     Output : Call edge configuration after all required process done
     Date   : 2020-09-03  
     */
-    checkForEdgeDeviceConfigurationProcess(item) {
+    checkForEdgeDeviceConfigurationProcess(item, deviceChanged) {
         var self = this;
         var deviceData = cache.get(self.SID + "_" + self.UNIQUE_ID);
         var hasItems = _.cloneDeep(deviceData.has);
@@ -1619,6 +1635,7 @@ class Mqtt {
         });
         var hasCount = 0;
 
+            
         if (tempArray.length > 0) {
             hasCount = tempArray.length;
             async.forEachSeries(tempArray, function (data, cb) {
@@ -1627,7 +1644,7 @@ class Mqtt {
                 }
                 cb();
             }, function () {
-                if (hasCount == self.HAS_ACTIVE_COUNT) {
+                if (hasCount == self.HAS_ACTIVE_COUNT || deviceChanged) {
                     self.HAS_ACTIVE_COUNT = 0;
                     self.startEdgeDeviceProcess();
                 }
@@ -1642,7 +1659,7 @@ class Mqtt {
     Output : Call attribute changed callback after all required process done
     Date   : 2020-09-03  
     */
-    attributeChangedCallbackProcess(item) {
+    attributeChangedCallbackProcess(item, deviceChanged) {
         var self = this;
         var deviceData = cache.get(self.SID + "_" + self.UNIQUE_ID);
         var hasItems = _.cloneDeep(deviceData.has);
@@ -1667,7 +1684,7 @@ class Mqtt {
                 }
                 cb();
             }, function () {
-                if (hasCount == self.HAS_ACTIVE_COUNT_ATTRIBUTE_CHANGES) {
+                if (hasCount == self.HAS_ACTIVE_COUNT_ATTRIBUTE_CHANGES || deviceChanged) {
                     if (self.ATTRIBUTE_CHANGED_CALLBACK) {
                         self.HAS_ACTIVE_COUNT_ATTRIBUTE_CHANGES = 0;
                         self.ATTRIBUTE_CHANGED_CALLBACK(deviceData.att);

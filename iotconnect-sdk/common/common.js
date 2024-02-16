@@ -9,9 +9,14 @@ var mqtt = require('mqtt');
 var fs = require('fs-extra');
 var fsep = require('fs-extra-promise');
 var config = require('./../config/config');
+var moment = require('moment');
+const isOnline = require('is-online');
+
 const {
     authType
 } = require('./../config/config');
+
+let lastEdgeFaultyDataTime = new Date().getTime();
 
 class CommonFunctions {
 
@@ -33,10 +38,6 @@ class CommonFunctions {
 
         if (sdkOption.SDK_TYPE == "MQTT") {
             deviceClient = require("./../client/mqttClient");
-        } else if (sdkOption.SDK_TYPE == "AZURE") {
-            deviceClient = require("./../client/azClient");
-        } else if (sdkOption.SDK_TYPE == "TPM") {
-            deviceClient = require("./../client/tpmClient");
         }
         this.BROKER_CLIENT = new deviceClient(sId, uniqueId, sdkOption);
         this.INTERVAL_OBJ = [];
@@ -51,12 +52,19 @@ class CommonFunctions {
     */
     getBaseUrl(callback) {
         var self = this;
-        var url = self.SDK_OPTIONS.discoveryUrl + config.discoveryBaseUrl;
+        var url = self.SDK_OPTIONS.discoveryUrl;
         var discoveryUrl = "";
 
         async.series([
             function (cb_series) {
-                discoveryUrl = url.replace("<<SID>>", self.SID);
+                
+                if(self.SDK_OPTIONS.cpId){
+                    discoveryUrl = url + config.discoveryUrlwithCpid;
+                    discoveryUrl = discoveryUrl.replace("<<CPID>>", self.SDK_OPTIONS.cpId).replace("<<ENV>>", self.SDK_OPTIONS.env).replace("<<PF>>", self.SDK_OPTIONS.pf);
+                } else {
+                    discoveryUrl = url + config.discoveryBaseUrl;
+                    discoveryUrl = discoveryUrl.replace("<<SID>>", self.SID);
+                }
                 cb_series();
             }
         ], function (err, response) {
@@ -122,7 +130,7 @@ class CommonFunctions {
             self.getBaseUrl(function (status, responseData) {
                 if (status == true && responseData.d.bu) {
                     let syncBaseUrl = responseData.d.bu + "/uid/" + self.UNIQUEID;
-                    console.log("CommonFunctions -> syncDevice -> syncBaseUrl", syncBaseUrl)
+                    self.manageDebugLog("INFO_IN07", self.UNIQUEID, self.SID, syncBaseUrl, 1, true);
                     request.get({
                             url: syncBaseUrl,
                             json: true
@@ -146,7 +154,7 @@ class CommonFunctions {
                                 }
                             } else {
                                 if (response && response.statusCode == 200 && body != undefined && body.d.ec == 0) {
-                                    console.log("CommonFunctions -> syncDevice -> body.d", body.d)
+                                    self.manageDebugLog("INFO_IN07", self.UNIQUEID, self.SID, JSON.stringify(body.d,null,2), 1, true);
                                     if (body.d.meta.v == config.msgFormatVersion) {
                                         self.manageDebugLog("INFO_IN01", self.UNIQUEID, self.SID, "", 1, self.IS_DEBUG);
                                         var resultData = body.d;
@@ -805,7 +813,7 @@ class CommonFunctions {
             if (deviceData.meta.edge == config.edgeEnableStatus.enabled) {
                 attributeObj.d = _.reduce(attributeObj.d, _.extend);
                 dataObj.d.push(attributeObj);
-                self.sendDataOnAzureMQTT(dataObj);
+                self.sendDataOnMQTT(dataObj);
             }
         })
     }
@@ -926,17 +934,17 @@ class CommonFunctions {
                                     data: deviceData
                                 })
                                 if (self.SDK_OPTIONS.isGatewayDevice) {
-                                    tag = resultDevice.value[0].tg;
+                                    tag = resultDevice.value[0]?.tg;
                                 } else {
                                     tag = undefined;
                                 }
 
-                                attributeObj["id"] = self.SDK_OPTIONS.isGatewayDevice ? uniqueId : undefined;
+                                attributeObj["id"] =uniqueId// self.SDK_OPTIONS.isGatewayDevice ? uniqueId : undefined;
                                 attributeObj["dt"] = deviceSendTime;
                                 attributeObj["tg"] = tag ? tag : undefined;
                                 attributeObj["d"] = [];
 
-                                attributeObjFLT["id"] = self.SDK_OPTIONS.isGatewayDevice ? uniqueId : undefined;
+                                attributeObjFLT["id"] = uniqueId//self.SDK_OPTIONS.isGatewayDevice ? uniqueId : undefined;
                                 attributeObjFLT["dt"] = deviceSendTime;
                                 attributeObjFLT["tg"] = tag ? tag : undefined;
                                 attributeObjFLT["d"] = [];
@@ -948,12 +956,13 @@ class CommonFunctions {
                                 var withoutParentRuleAttrObj = {};
                                 var parentRuleAttrObj = {};
                                 var ruleAttributeValidateArray = [];
+                                var parentDeviceAttributeInfo = [];
+                                var ruleValueFlag = 0;
                                 async.forEachSeries(Object.keys(data), function (attributeKey, cb_fl_dData) {
                                     var parentAttrObj = {}
                                     var parentAttrObjFLT = {}
 
-                                    if (typeof data[attributeKey] == "object") // true = Parent attribute
-                                    {
+                                    if (typeof data[attributeKey] == "object") {// true = Parent attribute, Attribute is of Object Type
                                         var parentChildArray = data[attributeKey];
                                         if (self.SDK_OPTIONS.isGatewayDevice && tag) {
                                             var resultDevice = jsonQuery('att[*p=' + attributeKey + ' & tg=' + tag + ']', {
@@ -964,72 +973,96 @@ class CommonFunctions {
                                                 data: deviceData
                                             })
                                         }
-                                        if (resultDevice.value.length > 0) {
-                                            async.forEachSeries(resultDevice.value, function (parentdeviceInfo, cb_fl_pdi) {
+                                        if (resultDevice.value?.length > 0) {
+                                            async.forEachSeries(Object.keys(parentChildArray), function (parentChildKey, cb_fl_child) {// START - Traverse all child Attribute in Object
+                                            async.forEachSeries(resultDevice.value, function (parentdeviceInfo, cb_fl_pdi) {// START - Traverse all keys in Object for Current Attribute's Value
+                                                // parentdeviceInfo = deviceInfo from server
+                                                // console.log("AWS NODE ~ file: common.js:978 ~ parentdeviceInfo:", parentdeviceInfo)
                                                 var parentAttributeName = parentdeviceInfo.p;
-                                                var parentDeviceAttributeInfo = [];
-                                                var ruleValueFlag = 0;
-                                                async.forEachSeries(parentdeviceInfo.d, function (childDeviceInfo, cb_fl_cdi) {
-                                                    async.forEachSeries(Object.keys(parentChildArray), function (parentChildKey, cb_fl_child) {
-                                                        var msgTypeStatus = 0;
-                                                        var attrValue = 0;
-                                                        if (parentChildKey == childDeviceInfo.ln) {
-                                                            var dataType = childDeviceInfo.dt;
-                                                            var dataValidation = childDeviceInfo.dv;
-                                                            attrValue = parentChildArray[parentChildKey];
-                                                            if (attrValue != "") {
-                                                                self.dataValidationTest(dataType, dataValidation, attrValue, childDeviceInfo, msgTypeStatus, function (childAttrObj) {
-                                                                    if (childAttrObj.msgTypeStatus == 1) //msgTypeStatus = 1 (Validation Failed)
-                                                                    {
-                                                                        if (!parentAttrObjFLT[parentAttributeName])
-                                                                            parentAttrObjFLT[parentAttributeName] = {};
-                                                                        delete childAttrObj['msgTypeStatus'];
-                                                                        parentAttrObjFLT[parentAttributeName][childAttrObj.ln] = childAttrObj.v;
-                                                                        cntFLT++;
-                                                                    } else {
-                                                                        if (deviceData.meta.edge == config.edgeEnableStatus.enabled && (dataType == config.dataType.INTEGER || dataType == config.dataType.LONG || dataType == config.dataType.DECIMAL)) // Its Edge Enable Device
+                                                var parentDevicechildDeviceInfoAttributeInfo = [];
+                                                ruleValueFlag = 0;
+                                                if(_.find(parentdeviceInfo.d, { "ln" : parentChildKey})){
+                                                    
+                                                        
+                                                    
+                                                        async.forEachSeries(parentdeviceInfo.d, function (childDeviceInfo, cb_fl_cdi) {
+                                                            var msgTypeStatus = 0;
+                                                            var attrValue = 0;
+                                                            if (parentChildKey == childDeviceInfo.ln) {
+                                                                var dataType = childDeviceInfo.dt;
+                                                                var dataValidation = childDeviceInfo.dv;
+                                                                attrValue = parentChildArray[parentChildKey];
+                                                                if (attrValue !== "") {
+                                                                    self.dataValidationTest(dataType, dataValidation, attrValue, childDeviceInfo, msgTypeStatus, function (childAttrObj) {
+                                                                        if (childAttrObj.msgTypeStatus == 1) //msgTypeStatus = 1 (Validation Failed)
                                                                         {
-                                                                            ruleValueFlag = 1;
-                                                                            childDeviceInfo.parentGuid = parentdeviceInfo.guid;
-                                                                            childDeviceInfo.p = parentAttributeName;
-                                                                            childDeviceInfo.value = attrValue;
-                                                                            parentDeviceAttributeInfo.push(childDeviceInfo);
-                                                                            self.setEdgeVal(childDeviceInfo, attrValue, uniqueId);
-                                                                            if (!parentRuleAttrObj[parentAttributeName])
-                                                                                parentRuleAttrObj[parentAttributeName] = {};
-                                                                            parentRuleAttrObj[parentAttributeName][childAttrObj.ln] = childAttrObj.v;
-                                                                        } else {
-                                                                            if (!parentAttrObj[parentAttributeName])
-                                                                                parentAttrObj[parentAttributeName] = {};
+                                                                            if (!parentAttrObjFLT[parentAttributeName])
+                                                                                parentAttrObjFLT[parentAttributeName] = {};
                                                                             delete childAttrObj['msgTypeStatus'];
-                                                                            parentAttrObj[parentAttributeName][childAttrObj.ln] = childAttrObj.v;
-                                                                            cntRPT++;
+                                                                            parentAttrObjFLT[parentAttributeName][childAttrObj.ln] = childAttrObj.v;
+                                                                            cntFLT++;
+                                                                        } else {
+                                                                            if (deviceData.meta.edge == config.edgeEnableStatus.enabled && (dataType == config.dataType.INTEGER || dataType == config.dataType.LONG || dataType == config.dataType.DECIMAL)) // Its Edge Enable Device
+                                                                            {
+                                                                                ruleValueFlag = 1;
+                                                                                childDeviceInfo.parentGuid = parentdeviceInfo.guid;
+                                                                                childDeviceInfo.p = parentAttributeName;
+                                                                                childDeviceInfo.value = attrValue;
+                                                                                parentDeviceAttributeInfo.push(childDeviceInfo);
+                                                                                self.setEdgeVal(childDeviceInfo, attrValue, uniqueId);
+                                                                                if (!parentRuleAttrObj[parentAttributeName])
+                                                                                    parentRuleAttrObj[parentAttributeName] = {};
+                                                                                parentRuleAttrObj[parentAttributeName][childAttrObj.ln] = childAttrObj.v;
+                                                                            } else {
+                                                                                if (!parentAttrObj[parentAttributeName])
+                                                                                    parentAttrObj[parentAttributeName] = {};
+                                                                                delete childAttrObj['msgTypeStatus'];
+                                                                                parentAttrObj[parentAttributeName][childAttrObj.ln] = childAttrObj.v;
+                                                                                cntRPT++;
+                                                                            }
                                                                         }
-                                                                    }
-                                                                    cb_fl_child();
-                                                                })
+                                                                        cb_fl_cdi();
+                                                                    })
+                                                                } else {
+                                                                    cb_fl_cdi();
+                                                                }
                                                             } else {
-                                                                cb_fl_child();
+                                                                cb_fl_cdi();
                                                             }
-                                                        } else {
-                                                            cb_fl_child();
-                                                        }
-                                                    }, function () {
-                                                        cb_fl_cdi();
-                                                    });
-                                                }, function () {
-                                                    if (deviceData.meta.edge == config.edgeEnableStatus.enabled && ruleValueFlag == 1) // Its Edge Enable Device
-                                                    {
-                                                        var tobj = {
-                                                            "parentDeviceAttributeInfo": parentDeviceAttributeInfo,
-                                                            "attrValue": null,
-                                                            "attributeObj": attributeObj
-                                                        }
-                                                        ruleAttributeValidateArray.push(tobj);
+                                                        }, function () {
+                                                            // cb_fl_child();
+                                                            cb_fl_pdi();
+                                                        });
+                                                    } else {
+                                                        if (!parentAttrObjFLT[parentAttributeName])
+                                                            parentAttrObjFLT[parentAttributeName] = {};
+                                                        parentAttrObjFLT[parentAttributeName][parentChildKey] = parentChildArray[parentChildKey];
+                                                        cntFLT++;
+                                                        cb_fl_pdi();
                                                     }
-                                                    cb_fl_pdi();
-                                                });
-                                            }, function () {
+                                                    }, function () { // END - Traverse all keys in Object for Current Attribute's Value 
+                                                        if (deviceData.meta.edge == config.edgeEnableStatus.enabled && ruleValueFlag == 1) // Its Edge Enable Device
+                                                        {
+                                                            var tobj = {
+                                                                "parentDeviceAttributeInfo": parentDeviceAttributeInfo,
+                                                                "attrValue": null,
+                                                                "attributeObj": attributeObj
+                                                            }
+                                                            ruleAttributeValidateArray.push(tobj);
+                                                        }
+                                                        cb_fl_child();
+                                                    });
+                                                // } else {
+                                                //     // delete childAttrObj['msgTypeStatus'];
+                                                //     // if (!parentAttrObjFLT[parentAttributeName])
+                                                //     // parentAttrObjFLT[parentAttributeName] = {};
+                                                //     // delete childAttrObj['msgTypeStatus'];
+                                                //     // parentAttrObjFLT[parentAttributeName][childAttrObj.ln] = childAttrObj.v;
+                                                //     parentAttrObjFLT[attributeKey] = data[attributeKey];
+                                                //     cntFLT++;
+                                                //     cb_fl_dData();
+                                                // }
+                                            }, function () { // END - Traverse all child Attribute in Object
                                                 if (parentAttrObjFLT) {
                                                     attributeObjFLT.d.push(parentAttrObjFLT);
                                                 }
@@ -1039,62 +1072,76 @@ class CommonFunctions {
                                                 cb_fl_dData();
                                             });
                                         } else {
+                                            if (!parentAttrObjFLT[attributeKey])
+                                                parentAttrObjFLT[attributeKey] = {};
+                                            parentAttrObjFLT[attributeKey] = parentChildArray;
+                                            cntFLT++;
+                                            if (parentAttrObjFLT) {
+                                                attributeObjFLT.d.push(parentAttrObjFLT);
+                                            }
                                             cb_fl_dData();
                                         }
                                     } else { // No Parent 
                                         async.forEachSeries(deviceData.att, function (noParentDeviceInfo, cb_fl_npdi) {
                                             if (noParentDeviceInfo.p == "") {
                                                 var parentAttributeName = noParentDeviceInfo.p;
-                                                async.forEachSeries(noParentDeviceInfo.d, function (childDeviceInfo, cb_fl_cdi) {
-                                                    var msgTypeStatus = 0;
-                                                    var tgflag = false;
-                                                    if (self.SDK_OPTIONS.isGatewayDevice && tag && childDeviceInfo.tg == tag) {
-                                                        tgflag = true;
-                                                    }
-                                                    if (!self.SDK_OPTIONS.isGatewayDevice && !tag) {
-                                                        tgflag = true;
-                                                    }
-                                                    if (tgflag && attributeKey == childDeviceInfo.ln) {
-                                                        var attrValue = data[attributeKey];
-                                                        var dataType = childDeviceInfo.dt;
-                                                        var dataValidation = childDeviceInfo.dv;
-                                                        if (attrValue != "") {
-                                                            self.dataValidationTest(dataType, dataValidation, attrValue, childDeviceInfo, msgTypeStatus, function (childAttrObj) {
-                                                                if (childAttrObj.msgTypeStatus == 1) //msgTypeStatus = 1 (Validation Failed)
-                                                                {
-                                                                    delete childAttrObj['msgTypeStatus'];
-                                                                    withoutParentAttrObjFLT[childAttrObj.ln] = childAttrObj.v;
-                                                                    cntFLT++;
-                                                                } else {
-                                                                    if (deviceData.meta.edge == config.edgeEnableStatus.enabled && (dataType == config.dataType.INTEGER || dataType == config.dataType.LONG || dataType == config.dataType.DECIMAL)) // Its Edge Enable Device
+                                                if(_.find(noParentDeviceInfo.d, { "ln" : attributeKey})){
+                                                    async.forEachSeries(noParentDeviceInfo.d, function (childDeviceInfo, cb_fl_cdi) {
+                                                        var msgTypeStatus = 0;
+                                                        var tgflag = false;
+                                                        if (self.SDK_OPTIONS.isGatewayDevice && tag && childDeviceInfo.tg == tag) {
+                                                            tgflag = true;
+                                                        }
+                                                        if (!self.SDK_OPTIONS.isGatewayDevice && !tag) {
+                                                            tgflag = true;
+                                                        }
+                                                        if (tgflag && attributeKey == childDeviceInfo.ln) {
+                                                            var attrValue = data[attributeKey];
+                                                            var dataType = childDeviceInfo.dt;
+                                                            var dataValidation = childDeviceInfo.dv;
+                                                            if (attrValue !== "" ) {
+                                                                self.dataValidationTest(dataType, dataValidation, attrValue, childDeviceInfo, msgTypeStatus, function (childAttrObj) {
+                                                                    if (childAttrObj.msgTypeStatus == 1) //msgTypeStatus = 1 (Validation Failed)
                                                                     {
-                                                                        childDeviceInfo.parentGuid = noParentDeviceInfo.guid;
-                                                                        childDeviceInfo.p = parentAttributeName;
-                                                                        self.setEdgeVal(childDeviceInfo, attrValue, uniqueId);
-                                                                        var tobj = {
-                                                                            "parentDeviceAttributeInfo": childDeviceInfo,
-                                                                            "attrValue": attrValue,
-                                                                            "attributeObj": attributeObj
-                                                                        }
-                                                                        ruleAttributeValidateArray.push(tobj);
-                                                                        withoutParentRuleAttrObj[childAttrObj.ln] = childAttrObj.v;
-                                                                    } else {
                                                                         delete childAttrObj['msgTypeStatus'];
-                                                                        withoutParentAttrObj[childAttrObj.ln] = childAttrObj.v;
-                                                                        cntRPT++;
+                                                                        withoutParentAttrObjFLT[childAttrObj.ln] = childAttrObj.v;
+                                                                        cntFLT++;
+                                                                    } else {
+                                                                        if (deviceData.meta.edge == config.edgeEnableStatus.enabled && (dataType == config.dataType.INTEGER || dataType == config.dataType.LONG || dataType == config.dataType.DECIMAL)) // Its Edge Enable Device
+                                                                        {
+                                                                            childDeviceInfo.parentGuid = noParentDeviceInfo.guid;
+                                                                            childDeviceInfo.p = parentAttributeName;
+                                                                            self.setEdgeVal(childDeviceInfo, attrValue, uniqueId);
+                                                                            var tobj = {
+                                                                                "parentDeviceAttributeInfo": childDeviceInfo,
+                                                                                "attrValue": attrValue,
+                                                                                "attributeObj": attributeObj
+                                                                            }
+                                                                            ruleAttributeValidateArray.push(tobj);
+                                                                            withoutParentRuleAttrObj[childAttrObj.ln] = childAttrObj.v;
+                                                                        } else {
+                                                                            delete childAttrObj['msgTypeStatus'];
+                                                                            withoutParentAttrObj[childAttrObj.ln] = childAttrObj.v;
+                                                                            cntRPT++;
+                                                                        }
                                                                     }
-                                                                }
+                                                                    cb_fl_cdi();
+                                                                })
+                                                            } else {
                                                                 cb_fl_cdi();
-                                                            })
+                                                            }
                                                         } else {
                                                             cb_fl_cdi();
                                                         }
-                                                    } else {
-                                                        cb_fl_cdi();
-                                                    }
-                                                }, function () {
+                                                    }, function () {
+                                                        cb_fl_npdi();
+                                                    });
+                                                } else {
+                                                    // delete childAttrObj['msgTypeStatus'];
+                                                    withoutParentAttrObjFLT[attributeKey] = data[attributeKey];
+                                                    cntFLT++;
                                                     cb_fl_npdi();
-                                                });
+                                                }
                                             } else {
                                                 cb_fl_npdi();
                                             }
@@ -1123,7 +1170,8 @@ class CommonFunctions {
                                 });
                             }
                         ], function (err, response) {
-                            if (cntFLT > 0 && deviceData.meta.edge == config.edgeEnableStatus.disabled) {
+                            // Edge Faulty TODO
+                            if (cntFLT > 0 ) {
                                 attributeObjFLT.d = _.reduce(attributeObjFLT.d, _.extend);
                                 dataObjFLT.d.push(attributeObjFLT)
                             }
@@ -1140,13 +1188,21 @@ class CommonFunctions {
                     cb_f2_dData();
                 }
             }, function () {
+                // Edge Faulty TODO
+                if(parseInt(new Date().getTime()) >= lastEdgeFaultyDataTime + config.edgeFaultDataFrequency){
+                    if (dataObjFLT.d.length > 0 && deviceData.meta.edge == config.edgeEnableStatus.enabled) {
+                        // console.log("===> flt => ", JSON.stringify(dataObjFLT));
+                        lastEdgeFaultyDataTime = new Date().getTime()
+                        self.sendDataOnMQTT(dataObjFLT);
+                    }    
+                }
                 if (dataObjFLT.d.length > 0 && deviceData.meta.edge == config.edgeEnableStatus.disabled) {
                     // console.log("===> flt => ", JSON.stringify(dataObjFLT));
-                    self.sendDataOnAzureMQTT(dataObjFLT);
+                    self.sendDataOnMQTT(dataObjFLT);
                 }
                 if (dataObj.d.length > 0 && deviceData.meta.edge == config.edgeEnableStatus.disabled) {
                     // console.log("===> rpt => ", JSON.stringify(dataObj));
-                    self.sendDataOnAzureMQTT(dataObj);
+                    self.sendDataOnMQTT(dataObj);
                 }
             });
         } catch (error) {
@@ -1175,7 +1231,7 @@ class CommonFunctions {
                 var eekey = actualDeviceId + "-" + attributeInfo.p;
             }
             var edgeObj = edgeDatObj[eekey];
-            async.forEachSeries(edgeObj.data, function (atrributeData, cb) {
+            async.forEachSeries(edgeObj?.data, function (atrributeData, cb) {
                 atrributeData["agt"] = config.aggregateType;
                 if (attributeInfo.ln == atrributeData.localName) {
                     var newAtrrValue = atrributeData;
@@ -1226,7 +1282,7 @@ class CommonFunctions {
             }
 
             var edgeObj = edgeDatObj[eekey];
-            async.forEachSeries(edgeObj.data, function (atrributeData, cb) {
+            async.forEachSeries(edgeObj?.data, function (atrributeData, cb) {
                 atrributeData["agt"] = attributeInfo.agt;
                 var newAtrrValue = atrributeData;
                 var inputCounter = parseInt(atrributeData.count) + 1;
@@ -1602,7 +1658,7 @@ class CommonFunctions {
                                 }
                                 self.sendCommand(cmdObj);
                                 newObj.d.push(attributeObj);
-                                self.sendDataOnAzureMQTT(newObj);
+                                self.sendDataOnMQTT(newObj);
                             } else { // Not Matched rule    
                                 self.manageDebugLog("INFO_EE02", self.UNIQUEID, self.SID, "", 1, self.IS_DEBUG);
                             }
@@ -1685,7 +1741,7 @@ class CommonFunctions {
                         cb_rl();
                     }, function () {
                         if (ruleFlag == 1) {
-                            self.sendDataOnAzureMQTT(newObj);
+                            self.sendDataOnMQTT(newObj);
                         }
                     });
                 }
@@ -1724,8 +1780,8 @@ class CommonFunctions {
         //console.log('datatype', dataType)
         var self = this;
         var childAttrObj = {};
+        var valueArray = dataValidation.split(",");
         if (dataType == config.dataType.INTEGER || dataType == config.dataType.LONG) {
-            var valueArray = dataValidation.split(",");
             var attrValue = attrValue.toString();
             var numbersInt = /^[-+]?[0-9]+$/;
             var numbersFloat = /^[-+]?[0-9]+\.[0-9]+$/;
@@ -1804,7 +1860,343 @@ class CommonFunctions {
                 childAttrObj["v"] = attrValue;
             }
             childAttrObj["msgTypeStatus"] = msgTypeStatus;
-        }else {
+        }else if (dataType == config.dataType.BIT) {
+            var attrValue1 = attrValue.toString();
+            if(!attrValue1.match(/^(0|1)$/)) {
+                msgTypeStatus = 1;
+            }
+
+            if(self.SDK_OPTIONS.isSkipValidation) {
+                if (isNumber == false) {
+                    msgTypeStatus = 1;
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            } else {
+                if (dataValidation != "" && dataValidation != null) {
+                    if (valueArray.indexOf(attrValue) == -1) {
+    
+                        var validationFlag = 1;
+                        async.forEachSeries(valueArray, function (restrictedValue, cbValue) {
+                            if (restrictedValue.indexOf("to") == -1) {
+                                if (attrValue == parseInt(restrictedValue.trim())) {
+                                    validationFlag = 0;
+                                }
+                                cbValue();
+                            } else {
+                                var valueRangeArray = restrictedValue.split("to");
+                                if (attrValue >= parseInt(valueRangeArray[0].trim()) && attrValue <= parseInt(valueRangeArray[1].trim())) {
+                                    validationFlag = 0;
+                                }
+                                cbValue();
+                            }
+    
+                        }, function () {
+                            if (validationFlag == 1 || isNumber == false) {
+                                msgTypeStatus = 1;
+                            }
+    
+                            childAttrObj["ln"] = childDeviceInfo.ln;
+                            childAttrObj["v"] = attrValue;
+                            childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                        });
+                    } else {
+                        if (isNumber == false) {
+                            msgTypeStatus = 1;
+                        }
+                        childAttrObj["ln"] = childDeviceInfo.ln;
+                        childAttrObj["v"] = attrValue;
+                        childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                    }
+                } else {
+                    if (isNumber == false) {
+                        msgTypeStatus = 1;
+                    }
+                    childAttrObj["ln"] = childDeviceInfo.ln;
+                    childAttrObj["v"] = attrValue;
+                    childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                }
+            }
+        }else if (dataType == config.dataType.BOOLEAN) {
+            var attrValue1 = attrValue.toString();
+            if(!attrValue1.match(/^(true|false|False|True)$/)) {
+                msgTypeStatus = 1;
+            }
+            if(self.SDK_OPTIONS.isSkipValidation) {
+                if (isNumber == false) {
+                    msgTypeStatus = 1;
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            } else {
+                if (dataValidation != "" && dataValidation != null) {
+                    if (valueArray.indexOf(attrValue) == -1) {
+    
+                        var validationFlag = 1;
+                        async.forEachSeries(valueArray, function (restrictedValue, cbValue) {
+                            if (restrictedValue.indexOf("to") == -1) {
+                                if (attrValue == parseInt(restrictedValue.trim())) {
+                                    validationFlag = 0;
+                                }
+                                cbValue();
+                            } else {
+                                var valueRangeArray = restrictedValue.split("to");
+                                if (attrValue >= parseInt(valueRangeArray[0].trim()) && attrValue <= parseInt(valueRangeArray[1].trim())) {
+                                    validationFlag = 0;
+                                }
+                                cbValue();
+                            }
+    
+                        }, function () {
+                            if (validationFlag == 1 || isNumber == false) {
+                                msgTypeStatus = 1;
+                            }
+    
+                            childAttrObj["ln"] = childDeviceInfo.ln;
+                            childAttrObj["v"] = attrValue;
+                            childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                        });
+                    } else {
+                        if (isNumber == false) {
+                            msgTypeStatus = 1;
+                        }
+                        childAttrObj["ln"] = childDeviceInfo.ln;
+                        childAttrObj["v"] = attrValue;
+                        childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                    }
+                } else {
+                    if (isNumber == false) {
+                        msgTypeStatus = 1;
+                    }
+                    childAttrObj["ln"] = childDeviceInfo.ln;
+                    childAttrObj["v"] = attrValue;
+                    childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                }
+            }
+        }else if (dataType == config.dataType.DECIMAL) {
+            var attrValue = attrValue.toString();
+            var valueArray = dataValidation.split(",");
+            var isDecimal = false
+            if(!attrValue.match('^-?\\d+(\\.\\d{1,7})?$')) {
+                msgTypeStatus = 1;
+                isDecimal = false
+            } else if(attrValue.match('^-?\\d+(\\.\\d{1,7})?$')){
+                if(!(Number(_.trim(attrValue)) >= Number((-7.9*1028).toString()) && Number(_.trim(attrValue)) <= Number((7.9*1028).toString()))){
+                    msgTypeStatus = 1
+                    isDecimal = false
+                }
+                else {
+                    isDecimal = true
+                }
+            } else {
+                isDecimal = true
+            }
+            if(self.SDK_OPTIONS.isSkipValidation) {
+                if (isDecimal == false) {
+                    msgTypeStatus = 1;
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            } else {
+                if (dataValidation != "" && dataValidation != null) {
+                    if (valueArray.indexOf(attrValue) == -1) {
+    
+                        var validationFlag = 1;
+                        async.forEachSeries(valueArray, function (restrictedValue, cbValue) {
+                            if (restrictedValue.indexOf("to") == -1) {
+                                if (attrValue == Number(_.trim(restrictedValue))) {
+                                    validationFlag = 0;
+                                }
+                                cbValue();
+                            } else {
+                                var valueRangeArray = restrictedValue.split("to");
+                                if (attrValue >= Number(_.trim(valueRangeArray[0])) && attrValue <= Number(_.trim(valueRangeArray[1]))) {
+                                    validationFlag = 0;
+                                }
+                                cbValue();
+                            }
+    
+                        }, function () {
+                            if (validationFlag == 1 || isDecimal == false) {
+                                msgTypeStatus = 1;
+                            }
+    
+                            childAttrObj["ln"] = childDeviceInfo.ln;
+                            childAttrObj["v"] = attrValue;
+                            childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                        });
+                    } else {
+                        if (isDecimal == false) {
+                            msgTypeStatus = 1;
+                        }
+                        childAttrObj["ln"] = childDeviceInfo.ln;
+                        childAttrObj["v"] = attrValue;
+                        childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                    }
+                } else {
+                    if (isDecimal == false) {
+                        msgTypeStatus = 1;
+                    }
+                    childAttrObj["ln"] = childDeviceInfo.ln;
+                    childAttrObj["v"] = attrValue;
+                    childAttrObj["msgTypeStatus"] = msgTypeStatus;
+                }
+            }
+            childAttrObj["ln"] = childDeviceInfo.ln;
+            childAttrObj["v"] = attrValue;
+            childAttrObj["msgTypeStatus"] = msgTypeStatus;
+        }else if (dataType == config.dataType.DATE) {
+            var attrValue1 = attrValue.toString();
+            var valid = true
+            if(!moment(attrValue1, 'YYYY-MM-DD', true).isValid()) {
+                msgTypeStatus = 1;
+                valid = false
+            }
+            if(self.SDK_OPTIONS.isSkipValidation) {
+                if (valid == false) {
+                    msgTypeStatus = 1;
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            } else {
+                if (dataValidation != "" && dataValidation != null) {
+                    let isValidFlag = false
+                _.map(_.split(dataValidation, ','), function (group) {
+                    let value = moment(attrValue1,'YYYY-MM-DD');
+                    if (group.includes('to')) {
+                    let tmpArr = _.split(group, 'to');
+                    let beforeValue = moment(tmpArr[0].trim(),'YYYY-MM-DD');
+                    let afterValue = moment(tmpArr[1].trim(),'YYYY-MM-DD');
+                    if (value.isBetween(beforeValue, afterValue, undefined, '[]')) {
+                        isValidFlag = true
+                      } 
+                      if (value.isBefore(beforeValue)) {
+                        isValidFlag = false
+                      } if (value.isAfter(afterValue)) {
+                        isValidFlag = false
+                      }
+                    } else {
+                        let value2 = moment(group.trim(),'YYYY-MM-DD');
+                        if (value.isSame(value2)) {
+                            isValidFlag = true
+                          }
+                    }
+                });
+                if (!isValidFlag){
+                    msgTypeStatus = 1
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            }       
+        }   
+            childAttrObj["ln"] = childDeviceInfo.ln;
+            childAttrObj["v"] = attrValue;
+            childAttrObj["msgTypeStatus"] = msgTypeStatus;
+        }else if (dataType == config.dataType.DATETIME) {
+            var attrValue1 = attrValue.toString();
+            var valid = true
+            if(!moment(attrValue1, 'YYYY-MM-DD[T]HH:mm:ss.SSS[Z]', true).isValid()) {
+                msgTypeStatus = 1;
+                valid = false
+            }
+            if(self.SDK_OPTIONS.isSkipValidation) {
+                if (valid == false) {
+                    msgTypeStatus = 1;
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            } else {
+                if (dataValidation != "" && dataValidation != null) {
+                    let isValidFlag = false
+                _.map(_.split(dataValidation, ','), function (group) {
+                    let value = moment(attrValue1,'YYYY-MM-DD[T]HH:mm:ss.SSS[Z]');
+                    if (group.includes('to')) {
+                    let tmpArr = _.split(group, 'to');
+                    let beforeValue = moment(tmpArr[0].trim(),'YYYY-MM-DD[T]HH:mm:ss.SSS[Z]');
+                    let afterValue = moment(tmpArr[1].trim(),'YYYY-MM-DD[T]HH:mm:ss.SSS[Z]');
+                    if (value.isBetween(beforeValue, afterValue, undefined, '[]')) {
+                        isValidFlag = true
+                      } 
+                      if (value.isBefore(beforeValue)) {
+                        isValidFlag = false
+                      } if (value.isAfter(afterValue)) {
+                        isValidFlag = false
+                      }
+                    } else {
+                        let value2 = moment(group.trim(),'YYYY-MM-DD[T]HH:mm:ss.SSS[Z]');
+                        if (value.isSame(value2)) {
+                            isValidFlag = true
+                          }
+                    }
+                });
+                if (!isValidFlag){
+                    msgTypeStatus = 1
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            }
+            }   
+            childAttrObj["ln"] = childDeviceInfo.ln;
+            childAttrObj["v"] = attrValue;
+            childAttrObj["msgTypeStatus"] = msgTypeStatus;
+        }else if (dataType == config.dataType.TIME) {
+        var attrValue1 = attrValue.toString();
+        var valid = true
+        if(!moment(attrValue1, 'HH:mm:ss', true).isValid()) {
+            msgTypeStatus = 1;
+            valid = false
+        }
+        if(self.SDK_OPTIONS.isSkipValidation) {
+            if (valid == false) {
+                msgTypeStatus = 1;
+            }
+            childAttrObj["ln"] = childDeviceInfo.ln;
+            childAttrObj["v"] = attrValue;
+            childAttrObj["msgTypeStatus"] = msgTypeStatus;
+        } else {
+            if (dataValidation != "" && dataValidation != null) {
+                let isValidFlag = false
+                _.map(_.split(dataValidation, ','), function (group) {
+                    let value = moment(attrValue1,'HH:mm:ss');
+                    if (group.includes('to')) {
+                    let tmpArr = _.split(group, 'to');
+                    let beforeValue = moment(tmpArr[0].trim(),'HH:mm:ss');
+                    let afterValue = moment(tmpArr[1].trim(),'HH:mm:ss');
+                    if (value.isBetween(beforeValue, afterValue, undefined, '[]')) {
+                        isValidFlag = true
+                      } 
+                      if (value.isBefore(beforeValue)) {
+                        isValidFlag = false
+                      } if (value.isAfter(afterValue)) {
+                        isValidFlag = false
+                      }
+                    } else {
+                        let value2 = moment(group.trim(),'HH:mm:ss');
+                        if (value.isSame(value2)) {
+                            isValidFlag = true
+                          }
+                    }
+                });
+                if (!isValidFlag){
+                    msgTypeStatus = 1
+                }
+                childAttrObj["ln"] = childDeviceInfo.ln;
+                childAttrObj["v"] = attrValue;
+                childAttrObj["msgTypeStatus"] = msgTypeStatus;
+            }
+        }   
+        childAttrObj["ln"] = childDeviceInfo.ln;
+        childAttrObj["v"] = attrValue;
+        childAttrObj["msgTypeStatus"] = msgTypeStatus;
+    }
+        else {
             childAttrObj["ln"] = childDeviceInfo.ln;
             childAttrObj["v"] = attrValue;
             childAttrObj["msgTypeStatus"] = msgTypeStatus;
@@ -1818,7 +2210,7 @@ class CommonFunctions {
     Output : Send data using MQTT to MQTT topic
     Date   : 2018-01-25
     */
-    sendDataOnAzureMQTT(sensorData) {
+    sendDataOnMQTT(sensorData) {
         var self = this;
         var cacheId = self.SID + "_" + self.UNIQUEID;
         var deviceSyncRes = cache.get(cacheId);
@@ -1827,7 +2219,7 @@ class CommonFunctions {
             var protocoalName = brokerConfiguration.n;
             if (protocoalName.toLowerCase() == "mqtt" && deviceSyncRes && "p" in deviceSyncRes) {
                 var mqttHost = brokerConfiguration.h;
-                //console.log("sendDataOnAzureMQTT -> mqttPublishData -> sensorData.mt", sensorData.d)
+                //console.log("sendDataOnMQTT -> mqttPublishData -> sensorData.mt", sensorData.d)
                 self.mqttPublishData(mqttHost, sensorData);
             } else if (protocoalName.toLowerCase() == "http" || protocoalName.toLowerCase() == "https") {
                 var headers = {
@@ -1857,8 +2249,6 @@ class CommonFunctions {
             var mqttHost = self.SDK_OPTIONS.CONNECTION_STRING.split(";")[0].split("=")[1];
             //console.log("Azure -> mqttPublishData -> sensorData", sensorData)
             self.mqttPublishData(mqttHost, sensorData);
-        } else if (self.SDK_OPTIONS.SDK_TYPE == "TPM") {
-            console.log("TPM Data send...");
         }
     }
 
@@ -1872,14 +2262,16 @@ class CommonFunctions {
         var self = this;
         try {
             
-            if (!offlineData['sid'])
-                offlineData['sid'] = self.SID;
+            // if (!offlineData['sid'])
+            offlineData['sid'] = self.SID;
             if (self.IS_RUNNING) {
                 setTimeout(() => {
+                    offlineData['sid'] = self.SID;
                     self.offlineProcess(offlineData);
                 }, 500);
             } else {
                 self.IS_RUNNING = true;
+                offlineData['sid'] = self.SID;
                 var logPath = self.LOG_PATH;
                 try {
                     fs.readdir(logPath, function (err, files) {
@@ -1903,7 +2295,7 @@ class CommonFunctions {
                                     ], function (err, fileSize) {
                                         if (!offlineData.mt || offlineData.mt == config.messageType.ack) {
                                             if (offlineData.mt != 0)
-                                                delete offlineData.sid; // Temp code
+                                                // delete offlineData.sid; // Temp code
                                             var uid = self.UNIQUEID;
                                         } else {
                                             var uid = offlineData.d[0].id;
@@ -1918,7 +2310,7 @@ class CommonFunctions {
                                                                 self.manageDebugLog("ERR_OS01", self.UNIQUEID, self.SID, err.message, 0, self.IS_DEBUG);
                                                                 cb();
                                                             } else {
-                                                                // console.log("\nOffline data saved ::: DeviceId :: " + clientId + " :: ", new Date());
+                                                                console.log("\nOffline data saved ::: DeviceId :: " + self.UNIQUEID + " :: ", new Date());
                                                                 self.manageDebugLog("INFO_OS02", self.UNIQUEID, self.SID, "", 1, self.IS_DEBUG);
                                                                 cb();
                                                             }
@@ -2050,7 +2442,7 @@ class CommonFunctions {
         var self = this;
         try {
             if (!offlineData.mt || offlineData.mt == config.messageType.ack) {
-                delete offlineData.sid; // Temp code
+                // delete offlineData.sid; // Temp code
                 //var uid = self.UNIQUEID;
             } else {
                 //var uid = offlineData.d[0].id;
@@ -2284,7 +2676,7 @@ class CommonFunctions {
                     try {
                         offlineDataResult['od'] = 1;
                         // offlineDataResult['mt'] = config.;
-                        self.sendDataOnAzureMQTT(offlineDataResult);
+                        self.sendDataOnMQTT(offlineDataResult);
 
                         var index = offDataObj.findIndex(obj => obj.t == offlineDataResult.t);
                         if (index > -1) {
@@ -2375,17 +2767,17 @@ class CommonFunctions {
     Output : It publish the data on cloud using broker connection
     Date   : 2020-11-25
     */
-    mqttPublishData(mqttHost, sensorData) {
-        // console.log("CommonFunctions -> mqttPublishData -> sensorData", sensorData)
+    async mqttPublishData(mqttHost, sensorData) {        
         var self = this;
         var cacheId = self.SID + "_" + self.UNIQUEID;
         var deviceSyncRes = cache.get(cacheId);
         var brokerConfiguration = deviceSyncRes.p;
+        let sysConnected = false;
         // self.offlineProcess(sensorData);
         // return false; 
 
-        require('dns').resolve(mqttHost, function (err) {
-            if (err) {
+        sysConnected = await isOnline();
+            if (!sysConnected) {
                 if (sensorData.mt == 1) {
                     setTimeout(() => {
                         if (!self.SDK_OPTIONS.offlineStorage.offlineProcessDisabled) {
@@ -2403,44 +2795,58 @@ class CommonFunctions {
                         // console.log("brokerConfiguration.topics -> ", brokerConfiguration.topics);
                         try {
                             var pubTopic = "";
+                            var messageType = "";
                             // if(deviceSyncRes.p && self.SDK_OPTIONS.SDK_TYPE == "MQTT")
                             // pubTopic = deviceSyncRes.p.topics.ack;
 
                             // console.log("CommonFunctions -> mqttPublishData -> sensorData.mt", sensorData.mt)
                             if (sensorData == "" && self.SDK_OPTIONS.SDK_TYPE == "MQTT") {
                                 sensorData = {"twin": "all"};
-                                pubTopic = config.twinResponsePubTopic;
+                                pubTopic = config[self.SDK_OPTIONS.pf]?.twinResponsePubTopic;
+                                if(self.SDK_OPTIONS.pf === "aws"){
+                                    pubTopic = deviceSyncRes.p.topics.set.pubForAll;
+                                }
                             } else if (sensorData['od'] == 1) {
                                 pubTopic = brokerConfiguration.topics.od;
                             } else if ((sensorData.mt || sensorData.mt == 0) && self.SDK_OPTIONS.SDK_TYPE == "MQTT") {
                                 switch (sensorData.mt) {
                                     case config.messageType.rpt:
                                         pubTopic = brokerConfiguration.topics.rpt;
+                                        messageType = "RPT"
                                         break;
                                     case config.messageType.flt:
                                         pubTopic = brokerConfiguration.topics.flt;
+                                        messageType = "FLT"
                                         break;
                                     case config.messageType.rptEdge:
                                         pubTopic = brokerConfiguration.topics.erpt;
+                                        messageType = "ERPT"
                                         break;
                                     case config.messageType.ruleMatchedEdge:
                                         pubTopic = brokerConfiguration.topics.erm;
+                                        messageType = "ERM"
                                         break;
                                     case config.messageType.deviceCommandAck:
                                         pubTopic = brokerConfiguration.topics.ack;
+                                        messageType = "CMD-ACK"
                                         break;
                                     case config.messageType.otaCommandAck:
                                         pubTopic = brokerConfiguration.topics.ack;
+                                        messageType = "OTA-ACK"
                                         break;
                                     case config.messageType.moduleCommandAck:
                                         pubTopic = brokerConfiguration.topics.ack;
+                                        messageType = "MOD-ACK"
                                         break;
 
                                     default:
                                         break;
                                 }
                             } else if ((!sensorData.mt || sensorData.mt != 0) && self.SDK_OPTIONS.SDK_TYPE == "MQTT") {
-                                pubTopic = config.twinPropertyPubTopic;
+                                pubTopic = config[self.SDK_OPTIONS.pf]?.twinPropertyPubTopic;
+                                if(self.SDK_OPTIONS.pf === "aws"){
+                                    pubTopic = deviceSyncRes.p.topics.set.pub;
+                                }
                                 // if("sid" in sensorData)
                                 //     delete sensorData.sid; // Temp Data
                             }
@@ -2449,6 +2855,8 @@ class CommonFunctions {
                                 sensorData["pubTopic"] = pubTopic;
                             }
                             sensorData["cd"] = deviceSyncRes.meta.cd ? deviceSyncRes.meta.cd : undefined;
+                            
+                            console.log("\x1b[33m %s %s\x1b[0m", messageType, pubTopic);
                             // console.log("sensorData === > ", self.SDK_OPTIONS.isDebug);
                             self.BROKER_CLIENT.messagePublish(sensorData, function (response) {
                                 if (response.status) {
@@ -2469,7 +2877,6 @@ class CommonFunctions {
                     self.manageDebugLog("ERR_SD01", self.UNIQUEID, self.SID, err.message, 0, self.IS_DEBUG);
                 }
             }
-        });
     }
 
     /*
@@ -2480,7 +2887,7 @@ class CommonFunctions {
     */
     mqttSubscribeData(cb) {
         var self = this;
-        if (!self.IS_DEVICE_CONNECTED) {
+        // if (self.IS_DEVICE_CONNECTED) {
             self.CMD_CALLBACK = cb;
             // console.log("1.0.1 ==> ")
             self.BROKER_CLIENT.subscribeData(function (response) {
@@ -2520,7 +2927,7 @@ class CommonFunctions {
                     self.manageDebugLog("ERR_IN01", self.UNIQUEID, self.SID, response.message, 0, self.IS_DEBUG);
                 }
             })
-        }
+        // }
     }
 
     /*
@@ -2553,7 +2960,6 @@ class CommonFunctions {
                                 clientId: brokerConfiguration.id,
                                 port: brokerConfiguration.p,
                                 username: brokerConfiguration.un,
-                                // password: brokerConfiguration.pwd+"123132132",
                                 password: brokerConfiguration.pwd,
                                 rejectUnauthorized: false,
                                 // rejectUnauthorized: true,
@@ -2562,6 +2968,10 @@ class CommonFunctions {
                                 // connectTimeout: 50000
                                 // pingTimer: 10
                             };
+                            if(self.SDK_OPTIONS.pf === "aws"){
+                                delete mqttOption.username;
+                                delete mqttOption.password;
+                            }
                             try {
                                 // console.log("mqttOption ==> ", mqttOption);
                                 var conObj = {
@@ -2614,10 +3024,14 @@ class CommonFunctions {
                                 username: brokerConfiguration.un,
                                 key: fs.readFileSync(sdkOption.certificate.SSLKeyPath),
                                 cert: fs.readFileSync(sdkOption.certificate.SSLCertPath),
-                                //ca: fs.readFileSync(sdkOption.certificate.SSLCaPath),
-                                rejectUnauthorized: true,
+                                ca: [fs.readFileSync(sdkOption.certificate.SSLCaPath)],
+                                rejectUnauthorized: false,
                                 reconnecting: true
                             };
+                            if(self.SDK_OPTIONS.pf === "aws"){
+                                delete mqttOption.username;
+                                delete mqttOption.password;
+                            }
 
                             try {
                                 var conObj = {
@@ -2673,14 +3087,20 @@ class CommonFunctions {
                             self.manageDebugLog("INFO_IN05", uniqueId, sId, "", 1, self.IS_DEBUG);
                             var mqttOption = {
                                 clientId: brokerConfiguration.id,
+                                // protocolId: 'MQIsdp', // Or 'MQIsdp' in MQTT 3.1 and 5.0
+                                // protocolVersion: 5, // 
                                 port: brokerConfiguration.p, //8883,
                                 username: brokerConfiguration.un,
                                 key: fs.readFileSync(sdkOption.certificate.SSLKeyPath),
                                 cert: fs.readFileSync(sdkOption.certificate.SSLCertPath),
-                                //ca: fs.readFileSync(sdkOption.certificate.SSLCaPath),
-                                rejectUnauthorized: true,
+                                ca: [fs.readFileSync(sdkOption.certificate.SSLCaPath)],
+                                rejectUnauthorized: false,
                                 reconnecting: true
                             };
+                            if(self.SDK_OPTIONS.pf === "aws"){
+                                delete mqttOption.username;
+                                delete mqttOption.password;
+                            }
                             try {
                                 var conObj = {
                                     "mqttUrl": mqttUrl,
@@ -2714,7 +3134,77 @@ class CommonFunctions {
                                 self.manageDebugLog("ERR_IN13", uniqueId, sId, "", 0, self.IS_DEBUG);
                                 self.manageDebugLog("ERR_IN01", uniqueId, sId, error.message, 0, self.IS_DEBUG);
                             }
+                        } else {
+                            self.manageDebugLog("ERR_IN11", uniqueId, sId, "", 0, self.IS_DEBUG);
+                            var result = {
+                                status: false,
+                                data: null,
+                                message: "Device connection failed"
+                            }
                             cb(result);
+                        }
+                    } catch (e) {
+                        self.manageDebugLog("ERR_IN01", uniqueId, sId, e.message, 0, self.IS_DEBUG);
+                        var result = {
+                            status: false,
+                            data: e,
+                            message: "Invalid certificate file."
+                        }
+                        cb(result);
+                    }
+                } else if (authType == config.authType.CA_INDIVIDUAL) {
+                    try {
+                        if (brokerConfiguration) {
+                            self.manageDebugLog("INFO_IN05", uniqueId, sId, "", 1, self.IS_DEBUG);
+                            var mqttOption = {
+                                clientId: brokerConfiguration.id,
+                                // protocolId: 'MQIsdp', // Or 'MQIsdp' in MQTT 3.1 and 5.0
+                                // protocolVersion: 5, // 
+                                port: brokerConfiguration.p, //8883,
+                                username: brokerConfiguration.un,
+                                key: fs.readFileSync(sdkOption.certificate.SSLKeyPath),
+                                cert: fs.readFileSync(sdkOption.certificate.SSLCertPath),
+                                ca: [fs.readFileSync(sdkOption.certificate.SSLCaPath)],
+                                rejectUnauthorized: false,
+                                reconnecting: true
+                            };
+                            if(self.SDK_OPTIONS.pf === "aws"){
+                                delete mqttOption.username;
+                                delete mqttOption.password;
+                            }
+                            try {
+                                var conObj = {
+                                    "mqttUrl": mqttUrl,
+                                    "mqttOption": mqttOption,
+                                }
+                                self.BROKER_CLIENT.clientConnection(conObj, function (response) {
+                                    // console.log("res ==> ", response);
+                                    if (response.status) {
+                                        var result = {
+                                            status: true,
+                                            data: {
+                                                "mqttClient": response.data,
+                                                "mqttClientId": brokerConfiguration.id
+                                            },
+                                            message: "Connection Established"
+                                        }
+                                    } else {
+                                        var result = response;
+                                    }
+                                    cb(result);
+                                })
+                            } catch (error) {
+                                var result = {
+                                    status: false,
+                                    data: {
+                                        "mqttClient": null,
+                                        "mqttClientId": null
+                                    },
+                                    message: error.message
+                                }
+                                self.manageDebugLog("ERR_IN13", uniqueId, sId, "", 0, self.IS_DEBUG);
+                                self.manageDebugLog("ERR_IN01", uniqueId, sId, error.message, 0, self.IS_DEBUG);
+                            }
                         } else {
                             self.manageDebugLog("ERR_IN11", uniqueId, sId, "", 0, self.IS_DEBUG);
                             var result = {
@@ -2734,47 +3224,7 @@ class CommonFunctions {
                         cb(result);
                     }
                 }
-            } else if (self.SDK_OPTIONS.SDK_TYPE == "TPM") {
-                // console.log("========================= TPM connection ===================");
-                self.BROKER_CLIENT.clientConnection(function (response) {
-                    if (response.status) {
-                        var result = {
-                            status: true,
-                            data: response.data,
-                            message: "Connection Established"
-                        }
-                        cb(result);
-                    } else {
-                        var result = {
-                            status: false,
-                            data: null,
-                            message: "Device connection failed"
-                        }
-                        cb(result);
-                    }
-                })
-            } else if (self.SDK_OPTIONS.SDK_TYPE == "AZURE") {
-                // console.log("Hello Az => ", self.SDK_OPTIONS);
-                // console.log("Hello Az => ", self.UNIQUEID);
-                // var conObj = {};
-                self.BROKER_CLIENT.clientConnection(function (response) {
-                    if (response.status) {
-                        var result = {
-                            status: true,
-                            data: response.data,
-                            message: "Connection Established"
-                        }
-                        cb(result);
-                    } else {
-                        var result = {
-                            status: false,
-                            data: null,
-                            message: "Device connection failed"
-                        }
-                        cb(result);
-                    }
-                })
-            }
+            } 
         } catch (error) {
             var result = {
                 status: false,
@@ -2849,7 +3299,7 @@ class CommonFunctions {
                 }
             }
         ], function (err, response) {
-            if (newAttributeObj.length > 0 && newDeviceObj.length > 0) {
+            if (newAttributeObj?.length > 0 && newDeviceObj?.length > 0) {
                 var sdkDataArray = [];
                 async.forEachSeries(newDeviceObj, function (device, callbackdev) {
                     var attArray = {
@@ -3126,10 +3576,10 @@ class CommonFunctions {
             //     })
             // }
         } catch (error) {
-            self.manageDebugLog("ERR_SD01", uniqueId, sId, error.message, 0, self.IS_DEBUG);
+            self.manageDebugLog("ERR_SD01", self.UNIQUEID, self.SID ,error.message, 0, self.IS_DEBUG);
             callback({
                 status: false,
-                data: e.message,
+                data: error.message,
                 message: "MQTT connection error"
             })
         }
@@ -3143,12 +3593,18 @@ class CommonFunctions {
     */
     UpdateTwin(obj, callback) {
         var self = this;
+        var cacheId = self.SID + "_" + self.UNIQUEID;
+        var deviceSyncRes = cache.get(cacheId);
+        var brokerConfiguration = deviceSyncRes.p;
         try {
             // obj['sid'] = self.SID;
             if (obj) {
                 if (self.SDK_OPTIONS.SDK_TYPE == "MQTT") {
-                    //self.sendDataOnAzureMQTT(obj)
-                    obj["pubTopic"] = config.twinPropertyPubTopic;
+                    //self.sendDataOnMQTT(obj)
+                    obj["pubTopic"] = config[self.SDK_OPTIONS.pf]?.twinPropertyPubTopic;
+                    if(self.SDK_OPTIONS.pf === "aws"){
+                        obj["pubTopic"] = obj["pubTopic"].replace(/{Cpid_DeviceID}/g,`${brokerConfiguration.id}`);
+                    }
                     console.log("CommonFunctions -> UpdateTwin -> obj", obj)
                     // delete obj.sid;
                     self.BROKER_CLIENT.messagePublish(obj, function (response) {
@@ -3164,8 +3620,6 @@ class CommonFunctions {
                     self.BROKER_CLIENT.updateTwinProperty(obj, function (response) {
                         callback(response)
                     });
-                } else if (self.SDK_OPTIONS.SDK_TYPE == "TPM") {
-                    console.log("============== TPM twin Updtae ==============");
                 }
             } else {
                 callback({
@@ -3196,15 +3650,15 @@ class CommonFunctions {
                 "dt": new Date(),
                 "mt": msgType,
                 "d": {
-                    "ack": status.ack,
+                    "ack": ackGuid,
                     "type": cmdType,
-                    //"st": status,
-                    "st": msgType,
-                    "msg": status.msg,
+                    "st": status,
+                    // "st": msgType,
+                    "msg": msg,
                     "cid": childId ? childId : null
                 }
             }
-            self.sendDataOnAzureMQTT(obj);
+            self.sendDataOnMQTT(obj);
             callback({
                 status: true,
                 data: null,
@@ -3228,10 +3682,9 @@ class CommonFunctions {
     getAllTwins(callback) {
         var self = this;
         try {
-            // brokerClient.publish(config.twinResponsePubTopic, "");
 
             if (self.SDK_OPTIONS.SDK_TYPE == "MQTT") {
-                // self.sendDataOnAzureMQTT("");
+                self.sendDataOnMQTT("");
                 callback({
                     status: true,
                     data: null,
@@ -3241,8 +3694,6 @@ class CommonFunctions {
                 self.BROKER_CLIENT.getTwinProperty(function (response) {
                     callback(response)
                 });
-            } else if (self.SDK_OPTIONS.SDK_TYPE == "TPM") {
-                console.log("============== TPM twin Updtae ==============")
             }
         } catch (error) {
             callback({
@@ -3389,7 +3840,7 @@ class CommonFunctions {
     }
 
     /* 
-     * Tpm device provisioning process
+     *
      * @author : MK
      * @param: 
      */
